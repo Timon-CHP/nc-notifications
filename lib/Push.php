@@ -58,6 +58,11 @@ class Push {
 	/** @var OutputInterface */
 	protected $output;
 
+	/** @var array */
+	protected $payloadsToSend = [];
+	/** @var bool */
+	protected $deferPayloads = false;
+
 	public function __construct(IDBConnection $connection, INotificationManager $notificationManager, IConfig $config, IProvider $tokenProvider, Manager $keyManager, IUserManager $userManager, IClientService $clientService, ILogger $log) {
 		$this->db = $connection;
 		$this->notificationManager = $notificationManager;
@@ -77,6 +82,15 @@ class Push {
 		if ($this->output) {
 			$this->output->writeln($message);
 		}
+	}
+
+	public function deferPayloads(): void {
+		$this->deferPayloads = true;
+	}
+
+	public function flushPayloads(): void {
+		$this->deferPayloads = false;
+		$this->sendNotificationsToProxies();
 	}
 
 	public function pushToDevice(int $id, INotification $notification, ?OutputInterface $output = null): void {
@@ -120,7 +134,6 @@ class Push {
 		});
 		$hasTalkApps = !empty($talkApps);
 
-		$pushNotifications = [];
 		foreach ($devices as $device) {
 			$this->printInfo('');
 			$this->printInfo('Device token:' . $device['token']);
@@ -146,10 +159,10 @@ class Push {
 				$payload = json_encode($this->encryptAndSign($userKey, $device, $id, $notification, $isTalkNotification));
 
 				$proxyServer = rtrim($device['proxyserver'], '/');
-				if (!isset($pushNotifications[$proxyServer])) {
-					$pushNotifications[$proxyServer] = [];
+				if (!isset($this->payloadsToSend[$proxyServer])) {
+					$this->payloadsToSend[$proxyServer] = [];
 				}
-				$pushNotifications[$proxyServer][] = $payload;
+				$this->payloadsToSend[$proxyServer][] = $payload;
 			} catch (InvalidTokenException $e) {
 				// Token does not exist anymore, should drop the push device entry
 				$this->printInfo('InvalidTokenException is thrown');
@@ -160,7 +173,9 @@ class Push {
 			}
 		}
 
-		$this->sendNotificationsToProxies($pushNotifications);
+		if (!$this->deferPayloads) {
+			$this->sendNotificationsToProxies();
+		}
 	}
 
 	public function pushDeleteToDevice(string $userId, int $notificationId): void {
@@ -175,16 +190,15 @@ class Push {
 		}
 
 		$userKey = $this->keyManager->getKey($user);
-		$pushNotifications = [];
 		foreach ($devices as $device) {
 			try {
 				$payload = json_encode($this->encryptAndSignDelete($userKey, $device, $notificationId));
 
 				$proxyServer = rtrim($device['proxyserver'], '/');
-				if (!isset($pushNotifications[$proxyServer])) {
-					$pushNotifications[$proxyServer] = [];
+				if (!isset($this->payloadsToSend[$proxyServer])) {
+					$this->payloadsToSend[$proxyServer] = [];
 				}
-				$pushNotifications[$proxyServer][] = $payload;
+				$this->payloadsToSend[$proxyServer][] = $payload;
 			} catch (InvalidTokenException $e) {
 				// Token does not exist anymore, should drop the push device entry
 				$this->deletePushToken($device['token']);
@@ -194,10 +208,14 @@ class Push {
 			}
 		}
 
-		$this->sendNotificationsToProxies($pushNotifications);
+		if (!$this->deferPayloads) {
+			$this->sendNotificationsToProxies();
+		}
 	}
 
-	protected function sendNotificationsToProxies(array $pushNotifications): void {
+	protected function sendNotificationsToProxies(): void {
+		$pushNotifications = $this->payloadsToSend;
+		$this->payloadsToSend = [];
 		if (empty($pushNotifications)) {
 			return;
 		}
